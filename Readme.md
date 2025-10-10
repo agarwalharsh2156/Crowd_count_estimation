@@ -41,11 +41,6 @@ This system leverages state-of-the-art deep learning models to estimate the numb
 - **Backend:** FastAPI, Python, [LWCC](https://github.com/tersekmatija/lwcc) (Lightweight Crowd Counting library)
 - **Frontend:** Streamlit (minimal design)
 
-> _Insert system architecture diagram screenshot here_
->
-> ![Architecture Diagram](screenshots/architecture-placeholder.png)
-
----
 
 ## Use Cases
 
