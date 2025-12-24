@@ -170,19 +170,19 @@ def main():
         
         st.header("🔧 Usage Tips")
         st.markdown("""
-        - Upload clear images with visible people
-        - Works best with crowd scenes
-        - Processing may take 10-30 seconds
-        - Larger images take longer to process
+        - Upload clear images with visible people.
+        - Works best with crowd scenes.
+        - Processing may take 10-30 seconds.
+        - Larger images take longer to process.
         """)
         
-        st.header("📈 Model Performance")
-        st.markdown("""
-        **Typical Accuracy:**
-        - Dense crowds: ±60-70 people
-        - Sparse crowds: ±8-12 people
-        - Overall correlation: >0.85
-        """)
+        # st.header("📈 Model Performance")
+        # st.markdown("""
+        # **Typical Accuracy:**
+        # - Dense crowds: ±60-70 people
+        # - Sparse crowds: ±8-12 people
+        # - Overall correlation: >0.85
+        # """)
 
 if __name__ == "__main__":
     main()
