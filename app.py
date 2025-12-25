@@ -59,7 +59,7 @@ async def startup_event():
                 
                 if crowd_counter.model is not None:
                     model_loaded = True
-                    logger.info(f"✅ Model loaded successfully: {model_name} ({weights})")
+                    logger.info(f"Model loaded successfully: {model_name} ({weights})")
                     break
                     
             except Exception as e:
@@ -67,10 +67,10 @@ async def startup_event():
                 continue
         
         if not model_loaded:
-            logger.error("❌ Failed to load any model configuration")
+            logger.error("Failed to load any model configuration")
             
     except Exception as e:
-        logger.error(f"❌ Startup failed: {e}")
+        logger.error(f"Startup failed: {e}")
         logger.error(traceback.format_exc())
 
 def save_uploaded_file(upload_file: UploadFile) -> str:
@@ -83,7 +83,7 @@ def save_uploaded_file(upload_file: UploadFile) -> str:
         timestamp = str(int(time.time()))
         file_extension = upload_file.filename.split('.')[-1]
         unique_filename = f"{timestamp}_{upload_file.filename}"
-        file_path = f"uploads/{unique_filename}"
+        file_path = f"uploads/{unique_filename}.{file_extension}"
         
         # Save file
         with open(file_path, "wb") as buffer:
@@ -221,13 +221,13 @@ async def predict_crowd_count(file: UploadFile = File(...)):
             "processing_time": "N/A"  # You can add timing if needed
         }
         
-        logger.info(f"✅ Prediction successful: {count:.2f}")
+        logger.info(f"Prediction successful: {count:.2f}")
         return JSONResponse(content=response)
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Prediction error: {e}")
+        logger.error(f"Prediction error: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
     
@@ -312,7 +312,7 @@ async def predict_batch(files: list[UploadFile] = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Batch prediction error: {e}")
+        logger.error(f"Batch prediction error: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
     
@@ -363,10 +363,10 @@ async def get_available_models():
     }
 
 if __name__ == "__main__":
-    print("🚀 Starting Crowd Counting API...")
-    print("📦 Make sure LWCC is properly installed: pip install lwcc")
-    print("🌐 API will be available at: http://localhost:8000")
-    print("📚 API docs will be available at: http://localhost:8000/docs")
+    print("Starting Crowd Counting API...")
+    print("Make sure LWCC is properly installed: pip install lwcc")
+    print("API will be available at: http://localhost:8000")
+    print("API docs will be available at: http://localhost:8000/docs")
     
     uvicorn.run(
         app, 
