@@ -130,9 +130,17 @@ def main():
                 c1, c2 = st.columns(2)
                 with c1:
                     image = Image.open(uploaded_file)
-                    st.image(image, caption="Uploaded Image", use_container_width=True)
+                    st.image(image, use_container_width=True)
+
+                    # Calculate Aspect Ratio
+                    width, height = image.size
+                    aspect_ratio = width / height
+                  
+                    # Show Name and Details just below the image
+                    st.markdown(f"**📄 {uploaded_file.name}**")
+                    st.caption(f"📏 {width}x{height} px | Aspect Ratio: {aspect_ratio:.2f}:1")
                 with c2:
-                    if st.button(f"🚀 Analyze Image {i+1}", key=f"btn_{i}", use_container_width=True):
+                    if st.button(f"🚀 Analyze Image {i+1}", key=f"btn_{i}", use_container_width=True, type="primary"):
                         with st.spinner("Analyzing..."):
                             uploaded_file.seek(0)
                             result = predict_crowd_count(uploaded_file)
@@ -228,7 +236,7 @@ def main():
                     while not result_queue.empty():
                         res = result_queue.get()
                         if res["success"]:
-                            results_list.append({"Time (s)": round(res["time"], 1), "Count": res["count"]})
+                            results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
                             df = pd.DataFrame(results_list)
                             chart_placeholder.line_chart(df.set_index("Time (s)"))
                         else:
@@ -255,7 +263,7 @@ def main():
                     while not result_queue.empty():
                         res = result_queue.get()
                         if res["success"]:
-                            results_list.append({"Time (s)": round(res["time"], 1), "Count": res["count"]})
+                            results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
                             df = pd.DataFrame(results_list)
                             chart_placeholder.line_chart(df.set_index("Time (s)"))
                         else:
@@ -268,7 +276,7 @@ def main():
                 while not result_queue.empty():
                     res = result_queue.get()
                     if res["success"]:
-                        results_list.append({"Time (s)": round(res["time"], 1), "Count": res["count"]})
+                        results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
                 
                 # Final Success Message
                 if results_list:
