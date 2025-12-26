@@ -1,377 +1,291 @@
-# Fix LWCC path issues before importing anything else
-import os
-from pathlib import Path
-Path(os.path.join(str(Path.home()), ".lwcc/weights")).mkdir(parents=True, exist_ok=True)
-
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+import streamlit as st
+import requests
 import io
 import base64
-import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
-import uvicorn
-from crowd_counter import CrowdCounter
-import logging
-import traceback
+import tempfile
+import cv2
+import pandas as pd
+import threading
+import queue
 import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Crowd Counting API", version="1.0.0")
-
-# Enable CORS for Streamlit frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Configure page
+st.set_page_config(
+    page_title="Crowd Counting App",
+    page_icon="👥",
+    layout="wide"
 )
 
-# Global model instance
-crowd_counter = None
-model_loaded = False
+# API Configuration
+API_BASE_URL = "http://localhost:8000"
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the crowd counting model on startup"""
-    global crowd_counter, model_loaded
-    try:
-        logger.info("Starting model initialization...")
-        
-        # Try different model configurations if one fails
-        model_configs = [
-            ("DM-Count", "SHA"),
-            ("CSRNet", "SHA"), 
-            ("SFANet", "SHA"),
-            ("CSRNet", "SHB")
-        ]
-        
-        for model_name, weights in model_configs:
-            try:
-                logger.info(f"Trying {model_name} with {weights} weights...")
-                crowd_counter = CrowdCounter(model_name=model_name, model_weights=weights)
-                crowd_counter.load_model()
-                
-                if crowd_counter.model is not None:
-                    model_loaded = True
-                    logger.info(f"Model loaded successfully: {model_name} ({weights})")
-                    break
-                    
-            except Exception as e:
-                logger.warning(f"Failed to load {model_name} ({weights}): {e}")
-                continue
-        
-        if not model_loaded:
-            logger.error("Failed to load any model configuration")
-            
-    except Exception as e:
-        logger.error(f"Startup failed: {e}")
-        logger.error(traceback.format_exc())
 
-def save_uploaded_file(upload_file: UploadFile) -> str:
-    """Save uploaded file to temporary directory"""
+def check_api_health():
+    """Check if API is running"""
     try:
-        # Create uploads directory if it doesn't exist
-        os.makedirs("uploads", exist_ok=True)
-        
-        # Generate unique filename with timestamp
-        timestamp = str(int(time.time()))
-        file_extension = upload_file.filename.split('.')[-1]
-        unique_filename = f"{timestamp}_{upload_file.filename}"
-        file_path = f"uploads/{unique_filename}.{file_extension}"
-        
-        # Save file
-        with open(file_path, "wb") as buffer:
-            content = upload_file.file.read()
-            buffer.write(content)
-        
-        logger.info(f"File saved: {file_path}")
-        return file_path
-        
-    except Exception as e:
-        logger.error(f"Error saving file: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
 
-def density_map_to_base64(density_map: np.ndarray) -> str:
-    """Convert density map numpy array to base64 encoded image string"""
+def predict_crowd_count(image_file):
+    """Send image to API for prediction"""
     try:
-        # Create figure
-        plt.figure(figsize=(12, 8))
-        plt.imshow(density_map, cmap='hot', interpolation='nearest')
-        plt.colorbar(label='Density', shrink=0.8)
-        plt.title('Crowd Density Map', fontsize=14)
-        plt.axis('off')
+        files = {"file": image_file}
+        response = requests.post(f"{API_BASE_URL}/predict", files=files, timeout=20)
         
-        # Save to bytes buffer
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight', dpi=150, 
-                   facecolor='white', edgecolor='none')
-        buffer.seek(0)
-        
-        # Convert to base64
-        image_base64 = base64.b64encode(buffer.getvalue()).decode()
-        plt.close()  # Important: close the figure to free memory
-        
-        return f"data:image/png;base64,{image_base64}"
-        
+        if response.status_code == 200:
+            return response.json()
+        return None
     except Exception as e:
-        logger.error(f"Error creating density map image: {e}")
         return None
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Crowd Counting API is running!", 
-        "status": "active",
-        "model_loaded": model_loaded
-    }
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    global crowd_counter, model_loaded
-    
-    if not model_loaded or not crowd_counter or not crowd_counter.model:
-        return {
-            "status": "unhealthy",
-            "model_status": "not loaded",
-            "error": "Model initialization failed"
-        }
-    
-    return {
-        "status": "healthy",
-        "model_status": "loaded",
-        "model_name": crowd_counter.model_name,
-        "model_weights": crowd_counter.model_weights
-    }
-
-@app.post("/predict")
-async def predict_crowd_count(file: UploadFile = File(...)):
+def api_worker(task_queue, result_queue):
     """
-    Predict crowd count from uploaded image
-    
-    Args:
-        file: Uploaded image file
-        
-    Returns:
-        JSON response with count and density map
+    Consumer Thread:
+    Pulls frames from the queue and sends them to the API.
     """
-    # Check if model is loaded
-    if not model_loaded or not crowd_counter or not crowd_counter.model:
-        logger.error("Model not loaded - returning 503")
-        raise HTTPException(
-            status_code=503, 
-            detail="Model not loaded. Please check server logs and restart."
-        )
-    
-    # Validate file
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-    
-    # Check file extension instead of content-type (more reliable)
-    allowed_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
-    file_ext = os.path.splitext(file.filename.lower())[1]
-    
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"File type {file_ext} not supported. Use: {', '.join(allowed_extensions)}"
-        )
-    
-    file_path = None
-    try:
-        # Save uploaded file
-        file_path = save_uploaded_file(file)
-        logger.info(f"Processing image: {file_path}")
+    while True:
+        item = task_queue.get()
+        if item is None: # Sentinel value to stop the thread
+            break
+            
+        timestamp, img_bytes_io = item
         
-        # Get prediction with density map using your existing method
-        result = crowd_counter.count_people(file_path, return_density_map=True)
-        
-        if result is None:
-            raise HTTPException(status_code=500, detail="Failed to process image - model returned None")
-        
-        # Handle the result format from your crowd_counter
-        if isinstance(result, tuple):
-            count, density_map = result
-        else:
-            count = result
-            density_map = None
-        
-        logger.info(f"Model prediction: {count}")
-        
-        # Convert density map to base64 image if available
-        density_map_image = None
-        if density_map is not None:
-            density_map_image = density_map_to_base64(density_map)
-        
-        response = {
-            "success": True,
-            "estimated_count": round(float(count), 2),
-            "density_map": density_map_image,
-            "model_info": {
-                "model_name": crowd_counter.model_name,
-                "model_weights": crowd_counter.model_weights
-            },
-            "processing_time": "N/A"  # You can add timing if needed
-        }
-        
-        logger.info(f"Prediction successful: {count:.2f}")
-        return JSONResponse(content=response)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-    
-    finally:
-        # Always clean up the uploaded file
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Cleaned up file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up file {file_path}: {e}")
-
-@app.post("/predict-batch")
-async def predict_batch(files: list[UploadFile] = File(...)):
-    """
-    Predict crowd count for multiple images
-    
-    Args:
-        files: List of uploaded image files (max 10)
-        
-    Returns:
-        JSON response with counts for all images
-    """
-    if not model_loaded or not crowd_counter or not crowd_counter.model:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    if len(files) > 10:  # Limit batch size
-        raise HTTPException(status_code=400, detail="Maximum 10 files allowed")
-    
-    if len(files) == 0:
-        raise HTTPException(status_code=400, detail="No files provided")
-    
-    results = []
-    file_paths = []
-    
-    try:
-        # Validate and save all files first
-        for file in files:
-            if not file.filename:
-                raise HTTPException(status_code=400, detail="Invalid file provided")
+        try:
+            # Send to API (This is the slow blocking part)
+            files = {"file": ("frame.png", img_bytes_io, "image/png")}
+            response = requests.post(f"{API_BASE_URL}/predict", files=files, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                count = data.get("estimated_count", 0)
+                result_queue.put({"success": True, "time": timestamp, "count": count})
+            else:
+                result_queue.put({"success": False, "error": f"API {response.status_code}", "time": timestamp})
                 
-            # Check file extension
-            allowed_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
-            file_ext = os.path.splitext(file.filename.lower())[1]
-            
-            if file_ext not in allowed_extensions:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"File {file.filename} has unsupported type {file_ext}"
-                )
-            
-            file_path = save_uploaded_file(file)
-            file_paths.append(file_path)
-        
-        # Get predictions for all images
-        logger.info(f"Processing batch of {len(file_paths)} images")
-        counts = crowd_counter.count_multiple_images(file_paths)
-        
-        if counts is None:
-            raise HTTPException(status_code=500, detail="Batch processing failed")
-        
-        # Format results
-        for i, (file, count) in enumerate(zip(files, counts)):
-            results.append({
-                "filename": file.filename,
-                "estimated_count": round(float(count), 2),
-                "status": "success"
-            })
-        
-        logger.info(f"✅ Batch processing successful: {len(results)} images")
-        
-        return JSONResponse(content={
-            "success": True,
-            "results": results,
-            "total_images": len(files),
-            "model_info": {
-                "model_name": crowd_counter.model_name,
-                "model_weights": crowd_counter.model_weights
-            }
-        })
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Batch prediction error: {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
-    
-    finally:
-        # Always clean up files
-        for file_path in file_paths:
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up file: {file_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up file {file_path}: {e}")
+        except Exception as e:
+            result_queue.put({"success": False, "error": str(e), "time": timestamp})
+        finally:
+            task_queue.task_done()
 
-@app.get("/models")
-async def get_available_models():
-    """Get information about available models"""
-    return {
-        "available_models": [
-            {
-                "name": "DM-Count",
-                "weights": ["SHA", "SHB", "QNRF"],
-                "description": "Distribution Matching for Crowd Counting",
-                "recommended": True
-            },
-            {
-                "name": "CSRNet", 
-                "weights": ["SHA", "SHB"],
-                "description": "Congested Scene Recognition Network",
-                "recommended": False
-            },
-            {
-                "name": "SFANet",
-                "weights": ["SHA", "SHB", "QNRF"], 
-                "description": "Scale-aware Feature Aggregation Network",
-                "recommended": False
-            },
-            {
-                "name": "Bayesian",
-                "weights": ["SHA", "SHB"],
-                "description": "Bayesian Crowd Counting",
-                "recommended": False
-            }
-        ],
-        "current_model": {
-            "name": crowd_counter.model_name if crowd_counter else None,
-            "weights": crowd_counter.model_weights if crowd_counter else None
-        } if model_loaded else None
-    }
+def main():
+    st.title("👥 Crowd Counting Application")
+    
+    # Check API status
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if check_api_health():
+            st.success("🟢 API Connected")
+        else:
+            st.error("🔴 API Disconnected")
+            return
+    
+    st.markdown("---")
+    tab1, tab2 = st.tabs(["🖼️ Image Analysis", "🎥 Video Analysis"])
+
+    # ----------------------- TAB 1: IMAGE ANALYSIS -----------------------
+    with tab1:
+        st.subheader("📤 Upload Image")
+        uploaded_files = st.file_uploader(
+            "Choose image file(s)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True
+        )
+
+        if uploaded_files:
+            for i, uploaded_file in enumerate(uploaded_files):
+                c1, c2 = st.columns(2)
+                with c1:
+                    image = Image.open(uploaded_file)
+                    st.image(image, use_container_width=True)
+
+                    # Calculate Aspect Ratio
+                    width, height = image.size
+                    aspect_ratio = width / height
+                  
+                    # Show Name and Details just below the image
+                    st.markdown(f"**📄 {uploaded_file.name}**")
+                    st.caption(f"📏 {width}x{height} px | Aspect Ratio: {aspect_ratio:.2f}:1")
+                with c2:
+                    if st.button(f"🚀 Analyze Image {i+1}", key=f"btn_{i}", use_container_width=True, type="primary"):
+                        with st.spinner("Analyzing..."):
+                            uploaded_file.seek(0)
+                            result = predict_crowd_count(uploaded_file)
+                            if result and result.get("success"):
+                                st.metric("Estimated Count", f"{result['estimated_count']:,.0f}")
+                                
+                                if result.get("density_map"):
+                                    dmap_data = base64.b64decode(result["density_map"].split(",")[1])
+                                    st.image(Image.open(io.BytesIO(dmap_data)), caption="Density Map", use_container_width=True)
+                            else:
+                                st.error("Analysis failed.")
+
+    # ----------------------- TAB 2: VIDEO ANALYSIS -----------------------
+    with tab2:
+        st.subheader("Upload Video for Trend Analysis")
+        video_file = st.file_uploader("Choose a video", type=['mp4', 'mov', 'avi'])
+        
+        interval = st.slider("Analysis Interval (seconds)", min_value=1, max_value=60, value=10)
+        
+        if video_file:
+            # 1. Media Player
+            st.markdown("### 📺 Preview")
+            st.video(video_file)
+            
+            # Setup Temp File
+            tfile = tempfile.NamedTemporaryFile(delete=False) 
+            tfile.write(video_file.read())
+            
+            cap = cv2.VideoCapture(tfile.name)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps
+            
+            st.info(f"Video Duration: {duration:.2f}s | FPS: {fps:.2f} | Total Frames: {frame_count}")
+            
+            if st.button("🚀 Start Video Analysis"):
+                frames_to_process = int(fps * interval)
+                
+                # 2. Initialize Queues and Thread
+                task_queue = queue.Queue()
+                result_queue = queue.Queue()
+                results_list = []
+                
+                # Start the background worker
+                worker = threading.Thread(target=api_worker, args=(task_queue, result_queue), daemon=True)
+                worker.start()
+                
+                # 3. Layout Setup
+                st.markdown("---")
+                st.subheader("⚡ Live Analysis Dashboard")
+                
+                col_chart, col_preview = st.columns([2, 1])
+                with col_chart:
+                    chart_placeholder = st.empty()
+                    status_placeholder = st.empty()
+                with col_preview:
+                    frame_placeholder = st.empty()
+                
+                progress_bar = st.progress(0)
+                
+                # 4. Producer Loop (Reads Video)
+                current_frame = 0
+                
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                        
+                    # Check if this frame is on the interval
+                    if current_frame % frames_to_process == 0:
+                        # --- PRODUCER WORK ---
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(frame_rgb)
+                        
+                        # Update "Live" Preview
+                        frame_placeholder.image(
+                            pil_img, 
+                            caption=f"Captured Frame at {current_frame/fps:.1f}s", 
+                            use_container_width=True
+                        )
+                        
+                        # Prepare for Queue
+                        img_byte_arr = io.BytesIO()
+                        pil_img.save(img_byte_arr, format='PNG') 
+                        img_byte_arr.seek(0)
+                        
+                        # Push to Queue
+                        timestamp = current_frame / fps
+                        task_queue.put((timestamp, img_byte_arr))
+                    
+                    # --- CONSUMER CHECK (Partial updates) ---
+                    # Check if any results are ready while we are still reading video
+                    while not result_queue.empty():
+                        res = result_queue.get()
+                        if res["success"]:
+                            results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
+                            df = pd.DataFrame(results_list)
+                            chart_placeholder.line_chart(df.set_index("Time (s)"))
+                        else:
+                            st.toast(f"Error at {res.get('time', 0):.1f}s: {res.get('error')}", icon="⚠️")
+
+                    current_frame += 1
+                    progress_bar.progress(min(current_frame / frame_count, 1.0))
+                
+                cap.release()
+                
+                # ---------------------------------------------------------
+                # 5. FIXED CLEANUP LOGIC
+                # ---------------------------------------------------------
+                remaining = task_queue.qsize()
+                if remaining > 0:
+                    status_placeholder.info(f"Video reading done. Processing {remaining} remaining frames...")
+                
+                # Signal worker to stop
+                task_queue.put(None)
+                
+                # Loop while the worker is still alive
+                while worker.is_alive():
+                    # Keep draining results so the UI updates LIVE
+                    while not result_queue.empty():
+                        res = result_queue.get()
+                        if res["success"]:
+                            results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
+                            df = pd.DataFrame(results_list)
+                            chart_placeholder.line_chart(df.set_index("Time (s)"))
+                        else:
+                            st.toast(f"Error at {res.get('time', 0):.1f}s: {res.get('error')}", icon="⚠️")
+                    
+                    # Sleep briefly to give the worker CPU time
+                    time.sleep(0.1)
+                
+                # Final check to ensure absolutely nothing was missed
+                while not result_queue.empty():
+                    res = result_queue.get()
+                    if res["success"]:
+                        results_list.append({"Time (s)": round(res["time"], 1), "Count": int(res["count"])})
+                
+                # Final Success Message
+                if results_list:
+                    df = pd.DataFrame(results_list)
+                    chart_placeholder.line_chart(df.set_index("Time (s)"))
+                    status_placeholder.success("✅ Video Analysis Complete!")
+                else:
+                    status_placeholder.warning("Analysis finished but no results were generated.")
+
+with st.sidebar:
+        st.header("ℹ️ About")
+        st.markdown("""
+        This application uses state-of-the-art deep learning models to count people in images.
+        
+        **Features:**
+        - Real-time crowd counting
+        - Density map visualization
+        - Multiple model support
+        - Easy-to-use interface
+        
+        **Supported Models:**
+        - DM-Count (Default)  
+        - CSRNet
+        - SFANet
+        - Bayesian Counting
+        """)
+        
+        st.header("🔧 Usage Tips")
+        st.markdown("""
+        - Upload clear images with visible people.
+        - Works best with crowd scenes.
+        - Processing may take 10-30 seconds.
+        - Larger images take longer to process.
+        """)
+        
+        # st.header("📈 Model Performance")
+        # st.markdown("""
+        # **Typical Accuracy:**
+        # - Dense crowds: ±60-70 people
+        # - Sparse crowds: ±8-12 people
+        # - Overall correlation: >0.85
+        # """)
 
 if __name__ == "__main__":
-    print("Starting Crowd Counting API...")
-    print("Make sure LWCC is properly installed: pip install lwcc")
-    print("API will be available at: http://localhost:8000")
-    print("API docs will be available at: http://localhost:8000/docs")
-    
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000, 
-        log_level="info",
-        reload=False  # Set to True for development
-    )
+    main()
