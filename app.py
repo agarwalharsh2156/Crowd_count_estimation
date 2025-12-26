@@ -1,7 +1,7 @@
 # Fix LWCC path issues before importing anything else
 import os
 from pathlib import Path
-Path("C:/.lwcc/weights").mkdir(parents=True, exist_ok=True)
+Path(os.path.join(str(Path.home()), ".lwcc/weights")).mkdir(parents=True, exist_ok=True)
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
